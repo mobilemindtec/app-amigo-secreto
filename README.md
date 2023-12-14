@@ -1,4 +1,4 @@
-# cljd_amigo_secreto
+# App Amigo Secreto
 
 A new Flutter project.
 
