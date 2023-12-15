@@ -57,7 +57,7 @@
 
 (defn get-url-shere [name friend]
   (let [friend-text (str "Seu amigo secreto é: " friend)
-        url (Uri.encodeComponent (str "Olá" name ", acesse o link para saber seu amigo secreto: https://www.mobilemind.com.br/decode/base64?text=" (encode friend-text)))]
+        url (Uri.encodeComponent (str "Olá " name ", acesse o link para saber seu amigo secreto: https://www.mobilemind.com.br/decode/base64?text=" (encode friend-text)))]
     (str "whatsapp://send?text=" url)))
 
 (defn get-busy-friends [people]
@@ -206,7 +206,8 @@
       (swap! app-state assoc :people sorted)
       (swap! app-state assoc :sorted true)
       (swap! app-state assoc :last-sort last-sort)
-      (persist-prefs))
+      (persist-prefs)
+      (show-msg ctx navigator (center-text-widget "Sorteio realizado!!!")))
     (catch Exception e
       (show-msg ctx navigator (center-text-widget (str e))))))
 
@@ -220,14 +221,15 @@
     cb-bypass))
 
 (defn on-click-sort [ctx navigator]
-  (when (:sorted @app-state) 
+  (if (:sorted @app-state) 
     (check-can-change
      ctx
      navigator 
      #(start-sort ctx navigator)
-     #(start-sort ctx navigator))))
+     #(start-sort ctx navigator))
+    (start-sort ctx navigator)))
 
-(defn on-click-share [friend]
+(defn on-click-share [name friend]
   (launcher/launch (get-url-shere name friend)))
 
 (defn add-person [tc]
@@ -292,7 +294,7 @@
    ctx 
    navigator
    #(reset-all)
-   #()))
+   #(reset-all)))
 
 (defn list-item [ctx navigator person]
   (let [name (:name person)
@@ -319,7 +321,7 @@
           (m/IconButton
            .icon (m/Icon m/Icons.send)
            .color m/Colors.blue
-           .onPressed #(on-click-share friend)))])))))
+           .onPressed #(on-click-share name friend)))])))))
 
   (defn create-last-sort-label [sorted last-sort]
     (if sorted
