@@ -8,6 +8,11 @@
             [cljd.flutter :as f]
             [clojure.string :as str]))
 
+(declare show-msg)
+(declare show-question)
+(declare center-text-widget)
+(declare button-widget)
+
 (defn people-mock []
   [{:name "Juca" :friend nil}
    {:name "Jonas" :friend nil}
@@ -19,27 +24,24 @@
    {:name "Thais" :friend nil}])
 
 (defonce app-state (atom {:people []
-                      :last-sort nil
-                      :sorted false}))
+                          :last-sort nil
+                          :sorted false}))
 
-
-
-(defn read-prefs []
+(defn load-prefs []
   (let [prefs (await (sp/SharedPreferences.getInstance))]
     (when (.containsKey prefs "people")
       (let [data (.getString prefs "people")
             last-sort (.getString prefs "last-sort")
             people (map (fn [c]
                           (let [vls (str/split c #"=")]
-                            {:name (first vls) :friend {:name (second vls)}})) 
-                        (str/split data #","))
-            ] 
+                            {:name (first vls) :friend {:name (second vls)}}))
+                        (str/split data #","))]
         (core/print "prefs found!!")
         (swap! app-state assoc :sorted true)
         (swap! app-state assoc :last-sort last-sort)
         (swap! app-state assoc :people people)))))
 
-(defn persist-prefs []
+(defn save-prefs! []
   (let [prefs (await (sp/SharedPreferences.getInstance))
         data-str (str/join "," (map
                                 #(str (:name %1) "=" (get-in %1 [:friend :name]))
@@ -48,39 +50,41 @@
     (.setString prefs "last-sort" last-sort)
     (.setString prefs "people" data-str)))
 
-(defn reset-prefs []
+(defn reset-prefs! []
   (let [prefs (await (sp/SharedPreferences.getInstance))]
     (.clear prefs)))
 
-(defn encode [text]
+(defn encode-text [text]
   (conv/base64.encode (conv/utf8.encode text)))
 
 (defn get-url-shere [name friend]
   (let [friend-text (str "Seu amigo secreto é: " friend)
-        url (Uri.encodeComponent (str "Olá " name ", acesse o link para saber seu amigo secreto: https://www.mobilemind.com.br/decode/base64?text=" (encode friend-text)))]
+        url (Uri.encodeComponent (str "Olá " name ", acesse o link para saber seu amigo secreto: https://www.mobilemind.com.br/decode/base64?text=" (encode-text friend-text)))]
     (str "whatsapp://send?text=" url)))
 
 (defn get-busy-friends [people]
   (map #(:friend %1)
        (filter #(not= (:friend %1) nil) people)))
 
-(defn all-friends-done? [people]
+(defn all-friends-is-done? [people]
   (let [items (filter #(nil? (:friend %1)) people)]
     (empty? items)))
 
-
 (defn get-available-friends->person [person people]
-  (filter #(not= (:name %1) (:name person)) people))
+  (filter (fn [p]
+            (and
+              (not= (:name p) (:name person)) ; is same person
+              (not= (:name p) (get-in person [:friend :name])))) ; is same friend's person
+          people))
 
 (defn get-free-friends [friends]
   (let [busy-friends (get-busy-friends friends)]
-    (println (str "busy-friends = " (count busy-friends)))
     (filter
      (fn [f]
        (empty? (filter #(= (:name %1) (:name f)) busy-friends)))
      friends)))
 
-(defn rand-friend [friends]
+(defn next-friend [friends]
   (let [next (rand-int (count friends))]
     (nth friends next)))
 
@@ -88,31 +92,43 @@
   ([]
    (sort-friends (:people @app-state)))
   ([people]
-   (if (all-friends-done? people)
+   (if (all-friends-is-done? people)
      people
      (let [person (first people)
            available-friends (get-available-friends->person person people)
            free-friends (get-free-friends available-friends)
-           friend (rand-friend free-friends)
+           friend (next-friend free-friends)
            new-person (assoc person :friend friend)
            updated (into (vec (rest people)) [new-person])]
        (sort-friends updated)))))
 
-(defn reset []
+(defn reset-people! []
   (let [people (:people @app-state)
         reseted (doall
                  (for [it people]
                    (assoc it :friend nil)))]
-    (reset-prefs) 
-    (swap! app-state assoc :people reseted) 
-    (swap! app-state assoc :sorted false) 
+    (reset-prefs!)
+    (swap! app-state assoc :people reseted)
+    (swap! app-state assoc :sorted false)
     (swap! app-state assoc :last-sort nil)))
 
-(defn reset-all []
-  (reset)
-  (swap! app-state assoc :people []) )
+(defn reset-state! []
+  (reset-people!)
+  (swap! app-state assoc :people []))
 
-(defn check-integrity [people]
+(defn remove-person! [person]
+  (let [people (filter #(not= (:name %1) (:name person)) (:people @app-state))]
+    (reset-people!)
+    (swap! app-state assoc :people people)))
+
+(defn add-person [tc]
+  ;(core/print (str "add-person " (:sorted @app-state)))
+  (let [people (:people @app-state)
+        updated (into people [{:name (.-text tc) :friend nil}])]
+    (swap! app-state assoc :people updated)
+    (.-text! tc "")))
+
+(defn check-result-integrity [people]
   (let [busy (get-busy-friends people)]
     (if (not= (count busy) (count people))
       (throw (new Exception (str "expected " (count people) " but found " (count busy))))
@@ -121,21 +137,31 @@
           (when (> n 1)
             (throw (new Exception (str "expected 1 but found " n)))))))))
 
-(defn new-button [text cb]
-  (m/ElevatedButton
-   .style (m/ElevatedButton.styleFrom
-           .backgroundColor m/Colors.blue)
-   .child (m/Text text
-                  .style (m/TextStyle
-                          .color m/Colors.white))
-   .onPressed cb))
 
-(defn center-text-widget [msg]
-  (m/Center 
-   .child
-   (m/Text 
-    msg 
-    .textAlign m/TextAlign.center)))
+(defn start-play [ctx navigator]
+  (reset-people!)
+  (try
+    (let [sorted (sort-friends)
+          fmt (intl/DateFormat "dd/MM/yyyy HH:mm")
+          last-sort (.format fmt (DateTime.now))]
+      (core/print (str "last-sort " last-sort))
+      (check-result-integrity sorted)
+      (swap! app-state assoc :people sorted)
+      (swap! app-state assoc :sorted true)
+      (swap! app-state assoc :last-sort last-sort)
+      (save-prefs!)
+      (show-msg ctx navigator (center-text-widget "Sorteio realizado!!!")))
+    (catch Exception e
+      (show-msg ctx navigator (center-text-widget (str e))))))
+
+(defn check-can-change [ctx navigator cb-confirm cb-bypass]
+  (if (:sorted @app-state)
+    (show-question
+     ctx
+     navigator
+     "Você já tem um sorteio salvo, se continuar o sorteio atual será perdido. Você confirma?"
+     cb-confirm)
+    cb-bypass))
 
 (defn show-msg [ctx navigator body]
   (m/showDialog
@@ -154,15 +180,15 @@
         (m/Container
          .padding (m/EdgeInsets.symmetric .vertical 15)
          .child
-         (new-button "OK" #(.pop navigator)))]))))))
+         (button-widget "OK" #(.pop navigator)))]))))))
 
 (defn show-question [ctx navigator msg confirm]
   (m/showDialog
    .context ctx
    .builder
    (f/build
-    (m/AlertDialog  
-     .content 
+    (m/AlertDialog
+     .content
      (m/Container
       .height 200
       .child
@@ -172,7 +198,7 @@
          .child
          (m/Center
           .child
-          (m/Text 
+          (m/Text
            msg
            .textAlign m/TextAlign.center)))
         (m/Container
@@ -185,70 +211,31 @@
             (m/Container
              .padding (m/EdgeInsets.symmetric .horizontal 5)
              .child
-             (new-button "Não" #(.pop navigator))))
+             (button-widget "Não" #(.pop navigator))))
            (m/Expanded
             .child
             (m/Container
              .padding (m/EdgeInsets.symmetric .horizontal 5)
              .child
-             (new-button "Sim" (fn [] 
-                                   (.pop navigator)
-                                   (confirm)))))]))]))))))
+             (button-widget "Sim" (fn []
+                                 (.pop navigator)
+                                 (confirm)))))]))]))))))
 
-(defn start-sort [ctx navigator]
-  (reset)
-  (try
-    (let [sorted (sort-friends)
-          fmt (intl/DateFormat "dd/MM/yyyy HH:mm")
-          last-sort (.format fmt (DateTime.now))]
-      (core/print (str "last-sort " last-sort))
-      (check-integrity sorted)
-      (swap! app-state assoc :people sorted)
-      (swap! app-state assoc :sorted true)
-      (swap! app-state assoc :last-sort last-sort)
-      (persist-prefs)
-      (show-msg ctx navigator (center-text-widget "Sorteio realizado!!!")))
-    (catch Exception e
-      (show-msg ctx navigator (center-text-widget (str e))))))
+(defn button-widget [text cb]
+  (m/ElevatedButton
+   .style (m/ElevatedButton.styleFrom
+           .backgroundColor m/Colors.blue)
+   .child (m/Text text
+                  .style (m/TextStyle
+                          .color m/Colors.white))
+   .onPressed cb))
 
-(defn check-can-change [ctx navigator cb-confirm cb-bypass]
-  (if (:sorted @app-state)
-    (show-question
-     ctx
-     navigator
-     "Você já tem um sorteio salvo, se continuar o sorteio atual será perdido. Você confirma?"
-     cb-confirm)
-    cb-bypass))
-
-(defn on-click-sort [ctx navigator]
-  (if (:sorted @app-state) 
-    (check-can-change
-     ctx
-     navigator 
-     #(start-sort ctx navigator)
-     #(start-sort ctx navigator))
-    (start-sort ctx navigator)))
-
-(defn on-click-share [name friend]
-  (launcher/launch (get-url-shere name friend)))
-
-(defn add-person [tc]
-  (core/print (str "add-person " (:sorted @app-state)))
-  (let [people (:people @app-state)
-        updated (into people [{:name (.-text tc) :friend nil}])]
-    (swap! app-state assoc :people updated)
-    (.-text! tc "")))
-
-
-(defn on-click-add [ctx navigator tc]
-  (when-not (empty? (.-text tc)) 
-    (check-can-change 
-     ctx 
-     navigator 
-     (fn [] 
-       (reset) 
-       (add-person tc))
-     (add-person tc))))
+(defn center-text-widget [msg]
+  (m/Center
+   .child
+   (m/Text
+    msg
+    .textAlign m/TextAlign.center)))
 
 (defn create-show-friend-widget [friend]
   (m/Column
@@ -258,7 +245,7 @@
              "Seu amigo secreto é:"
              .textAlign m/TextAlign.center
              .style (m/TextStyle
-                    .fontSize 20)))
+                     .fontSize 20)))
     (m/Container
      .padding (m/EdgeInsets.symmetric .vertical 15)
      .child
@@ -270,33 +257,10 @@
                       .fontSize 30
                       .fontWeight m/FontWeight.bold))))]))
 
-(defn remove-person [person]
-  (let [people (filter #(not= (:name %1) (:name person)) (:people @app-state))]
-    (reset)
-    (swap! app-state assoc :people people)))
+(declare on-click-remove)
+(declare on-click-share)
 
-
-(defn on-click-remove [ctx navigator person] 
-  (show-question 
-   ctx 
-   navigator 
-   "Deseja remover essa pessoa?" 
-   (fn []
-     (check-can-change
-      ctx
-      navigator
-      #(remove-person person)
-      #(remove-person person)))))
-
-
-(defn on-click-reset [ctx navigator]
-  (check-can-change 
-   ctx 
-   navigator
-   #(reset-all)
-   #(reset-all)))
-
-(defn list-item [ctx navigator person]
+(defn list-item-widget [ctx navigator person]
   (let [name (:name person)
         friend (get-in person [:friend :name])]
     (m/GestureDetector
@@ -323,74 +287,115 @@
            .color m/Colors.blue
            .onPressed #(on-click-share name friend)))])))))
 
-  (defn create-last-sort-label [sorted last-sort]
-    (if sorted
-      (m/Container
-       .padding (m/EdgeInsets.only .top 5)
-       .child
-       (m/Center
-        .child
-        (m/Text (str "Sorteio realizado em " last-sort))))
-      (m/Container)))
+(defn last-sort-label-widget [sorted last-sort]
+  (if sorted
+    (m/Container
+     .padding (m/EdgeInsets.only .top 5)
+     .child
+     (m/Center
+      .child
+      (m/Text (str "Sorteio realizado em " last-sort))))
+    (m/Container)))
 
-  (defn main []
-    (m/WidgetsFlutterBinding.ensureInitialized)
-    (read-prefs)
-    (f/run
-     (m/MaterialApp
-      .title "Amigo Secreto"
-      .theme (m/ThemeData .primarySwatch m.Colors/pink))
-     .home
-     (m/Scaffold
-      .appBar (m/AppBar
-                .title (m/Text "Amigo Secreto")
-                .actions [(f/widget
-                           :context ctx
-                           :get [m/Navigator]
-                           (m/TextButton
-                           .child (m/Text "reset")
-                           .onPressed (fn []
-                                        (let [context ctx
-                                              nav navigator]
-                                          (on-click-reset context nav)))))]))
-     .body
-     (f/widget
-      :context ctx
-      :managed [tc (m/TextEditingController)]
-      :watch [{:keys [people sorted last-sort]} app-state]
-      :get [m/Navigator]
-      m/Container
-      :padding {:horizontal 20 :vertical 20}
-      (m/Column
+(defn on-click-start-play [ctx navigator]
+  (if (:sorted @app-state)
+    (check-can-change
+     ctx
+     navigator
+     #(start-play ctx navigator)
+     #(start-play ctx navigator))
+    (start-play ctx navigator)))
+
+(defn on-click-share [name friend]
+  (launcher/launch (get-url-shere name friend)))
+
+(defn on-click-add-person [ctx navigator tc]
+  (when-not (empty? (.-text tc))
+    (check-can-change
+     ctx
+     navigator
+     (fn []
+       (reset-people!)
+       (add-person tc))
+     (add-person tc))))
+
+(defn on-click-remove [ctx navigator person]
+  (show-question
+   ctx
+   navigator
+   "Deseja remover essa pessoa?"
+   (fn []
+     (check-can-change
+      ctx
+      navigator
+      #(remove-person! person)
+      #(remove-person! person)))))
+
+(defn on-click-reset [ctx navigator]
+  (check-can-change
+   ctx
+   navigator
+   #(reset-state!)
+   #(reset-state!)))
+
+(defn main []
+  (m/WidgetsFlutterBinding.ensureInitialized)
+  (load-prefs)
+  (f/run
+   (m/MaterialApp
+    .title "Amigo Secreto"
+    .theme (m/ThemeData .primarySwatch m.Colors/pink))
+   .home
+   (m/Scaffold
+    .appBar (m/AppBar
+             .title (m/Text "Amigo Secreto")
+             .actions [(f/widget
+                        :context ctx
+                        :get [m/Navigator]
+                        (m/TextButton
+                         .child (m/Text "reset")
+                         .onPressed (fn []
+                                      (let [context ctx
+                                            nav navigator]
+                                        (on-click-reset context nav)))))]))
+   .body
+   (f/widget
+    :context ctx
+    :managed [tc (m/TextEditingController)]
+    :watch [{:keys [people sorted last-sort]} app-state]
+    :get [m/Navigator]
+    m/Container
+    :padding {:horizontal 20 :vertical 20}
+    (m/Column
+     .children
+     [(m/Row
        .children
-       [(m/Row
-         .children
-         [(m/Expanded
-           .flex 2
-           .child (m/TextField .controller tc))
-          (new-button "Adicionar" (fn []
-                                    (let [t tc
-                                          context ctx
-                                          nav navigator]
-                                      (on-click-add context nav t))))])
-        (m/Expanded
-         .child
-         (m/Container
-          .child
-          (if (empty? people)
-            (m/Container
-             .child
-             (m/Center
-              .child
-              (m/Text "A lista de pessoas está vazia")))
-            (m/ListView
-             .children
-             (for [it people]
-               (list-item ctx navigator it))))))
-        (new-button 
-         (if sorted "Sortear novamente" "Sortear") 
-         (fn [] 
-           (let [context ctx 
-                 nav navigator] 
-             (on-click-sort context nav))))
-        (create-last-sort-label sorted last-sort)]))))
+       [(m/Expanded
+         .flex 2
+         .child (m/TextField .controller tc))
+        (button-widget "Adicionar" (fn []
+                                  (let [t tc
+                                        context ctx
+                                        nav navigator]
+                                    (on-click-add-person context nav t))))])
+      (m/Expanded
+       .child
+       (m/Container
+        .child
+        (if (empty? people)
+          (m/Container
+           .child
+           (m/Center
+            .child
+            (m/Text "A lista de pessoas está vazia")))
+          (m/ListView
+           .children
+           (for [it people]
+             (list-item-widget ctx navigator it))))))
+      (button-widget
+       (if sorted "Sortear novamente" "Sortear")
+       (fn []
+         (let [context ctx
+               nav navigator]
+           (on-click-start-play context nav))))
+      (last-sort-label-widget sorted last-sort)]))))
